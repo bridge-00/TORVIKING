@@ -21,6 +21,9 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Install aria2
         shell: pwsh
         run: |
@@ -65,7 +68,6 @@ jobs:
 
           Write-Host "✅ Download complete"
 
-          # Show what was downloaded
           Write-Host "━━━ Downloaded files ━━━"
           Get-ChildItem downloads -Recurse -File | ForEach-Object {
             Write-Host "  📄 $($_.FullName) ($([math]::Round($_.Length / 1MB, 2)) MB)"
@@ -78,10 +80,6 @@ jobs:
           $folder   = "${{ github.event.inputs.viking_folder }}"
           $chatId   = "${{ github.event.inputs.telegram_chat_id }}"
           $botToken = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
-
-          # ── Download the uploader script ──
-          Invoke-WebRequest https://raw.githubusercontent.com/Hexdare/VikingFile-Upload/main/upload.py -OutFile upload.py
-          Write-Host "✅ Uploader script downloaded"
 
           # ── Find all downloaded files (skip aria2 temp files) ──
           $files = Get-ChildItem downloads -Recurse -File | Where-Object { $_.Extension -ne ".aria2" }
@@ -109,47 +107,55 @@ jobs:
             Write-Host ""
             Write-Host "📄 Uploading: $($f.Name) ($([math]::Round($f.Length / 1MB, 2)) MB)"
 
-            # ── Build argument list (DO NOT use $args - it's reserved in PowerShell!) ──
+            # ── Build argument list ──
             $uploadArgs = @($f.FullName)
             if ($userHash) { $uploadArgs += $userHash }
             if ($folder)   { $uploadArgs += $folder }
 
             Write-Host "Running: python upload.py $($uploadArgs -join ' ')"
 
-            # ── Run the uploader and capture output ──
+            # ── Run OUR upload.py (from the repo, with proper headers) ──
             $rawOutput = python upload.py @uploadArgs 2>&1 | Out-String
 
-            # ── Strip ANSI escape codes from output for clean parsing ──
+            # ── Strip ANSI escape codes ──
             $cleanOutput = $rawOutput -replace '\x1b\[[0-9;]*m', '' -replace '\x1b\[\?[0-9;]*[a-zA-Z]', ''
 
-            Write-Host "──── UPLOADER OUTPUT (clean) ────"
+            Write-Host "──── UPLOADER OUTPUT ────"
             Write-Host $cleanOutput
-            Write-Host "─────────────────────────────────"
+            Write-Host "─────────────────────────"
 
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "⚠️ Upload process exited with code $LASTEXITCODE"
-              $failedFiles += $f.Name
-              continue
-            }
-
-            # ── Extract the VikingFile link ──
+            # ── Extract link using the DOWNLOAD_LINK: marker ──
             $found = $false
             $lines = $cleanOutput -split "`n"
 
             foreach ($line in $lines) {
               $trimmed = $line.Trim()
 
-              # Match vikingfile.com URLs specifically
-              if ($trimmed -match '(https?://[^\s]*vikingfile\.com[^\s]*)') {
-                $extractedLink = $Matches[1]
+              # Primary: look for our explicit marker
+              if ($trimmed -match '^DOWNLOAD_LINK:(.+)$') {
+                $extractedLink = $Matches[1].Trim()
                 $uploadedLinks += "🔗 $($f.Name): $extractedLink"
-                Write-Host "✅ Found link: $extractedLink"
+                Write-Host "✅ Found link (marker): $extractedLink"
                 $found = $true
                 break
               }
             }
 
-            # Fallback: try to match any URL if vikingfile wasn't found
+            # Fallback: match vikingfile URLs
+            if (-not $found) {
+              foreach ($line in $lines) {
+                $trimmed = $line.Trim()
+                if ($trimmed -match '(https?://[^\s]*vikingfile\.com[^\s]*)') {
+                  $extractedLink = $Matches[1]
+                  $uploadedLinks += "🔗 $($f.Name): $extractedLink"
+                  Write-Host "✅ Found link (url match): $extractedLink"
+                  $found = $true
+                  break
+                }
+              }
+            }
+
+            # Last fallback: any URL
             if (-not $found) {
               foreach ($line in $lines) {
                 $trimmed = $line.Trim()
@@ -181,12 +187,12 @@ jobs:
           # ── Send Telegram notification ──
           if ($chatId -and $botToken) {
             if ($uploadedLinks.Count -gt 0) {
-              $msg = "⚔️ TORVIKING COMPLETE!`n`n" + ($uploadedLinks -join "`n")
+              $msg = "TORVIKING COMPLETE!`n`n" + ($uploadedLinks -join "`n")
               if ($failedFiles.Count -gt 0) {
-                $msg += "`n`n⚠️ Failed: " + ($failedFiles -join ", ")
+                $msg += "`n`nFailed: " + ($failedFiles -join ", ")
               }
             } else {
-              $msg = "⚠️ TORVIKING: Upload finished but no links were detected.`n`nFiles attempted: $($files.Count)`nCheck the GitHub Actions logs for details."
+              $msg = "TORVIKING: Upload failed.`n`nFiles attempted: $($files.Count)`nCheck GitHub Actions logs."
             }
 
             try {
@@ -197,28 +203,13 @@ jobs:
                 -Body (ConvertTo-Json @{
                   chat_id = $chatId
                   text = $msg
-                  parse_mode = "Markdown"
                 })
               Write-Host "📨 Telegram notification sent"
             } catch {
-              Write-Host "⚠️ Failed to send Telegram message: $_"
-              # Try again without parse_mode in case markdown breaks
-              try {
-                Invoke-RestMethod `
-                  -Uri "https://api.telegram.org/bot$botToken/sendMessage" `
-                  -Method Post `
-                  -ContentType "application/json" `
-                  -Body (ConvertTo-Json @{
-                    chat_id = $chatId
-                    text = $msg
-                  })
-                Write-Host "📨 Telegram notification sent (plain text)"
-              } catch {
-                Write-Host "❌ Telegram notification failed completely: $_"
-              }
+              Write-Host "⚠️ Telegram send failed: $_"
             }
           } else {
-            Write-Host "⚠️ No Telegram chat ID or bot token — skipping notification"
+            Write-Host "⚠️ No Telegram chat ID or bot token"
           }
 
           # Fail the workflow if no links were found
