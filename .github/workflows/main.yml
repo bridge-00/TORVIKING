@@ -37,7 +37,9 @@ jobs:
         run: |
           $link = "${{ github.event.inputs.torrent_link }}"
 
-          Write-Host "📥 Downloading..."
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "📥 DOWNLOADING"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
 
           .\aria2\aria2c.exe `
             --dir=downloads `
@@ -62,17 +64,21 @@ jobs:
           $folder   = "${{ github.event.inputs.viking_folder }}"
           $chatId   = "${{ github.event.inputs.telegram_chat_id }}"
 
-          # ✅ FIXED HERE
+          # ✅ FIXED ARRAY
           $uploadedLinks = @()
 
-          Write-Host "📤 Uploading files..."
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "📤 UPLOADING"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
 
+          # Download uploader
           Invoke-WebRequest https://raw.githubusercontent.com/Hexdare/VikingFile-Upload/main/upload.py -OutFile upload.py
 
           $files = Get-ChildItem downloads -Recurse -File | Where-Object { $_.Extension -ne ".aria2" }
 
           foreach ($f in $files) {
-            Write-Host "Uploading $($f.Name)..."
+            Write-Host ""
+            Write-Host "📄 Uploading: $($f.Name)"
 
             $args = @($f.FullName)
             if ($userHash) { $args += $userHash }
@@ -80,25 +86,51 @@ jobs:
 
             $output = python upload.py @args 2>&1 | Out-String
 
+            # 🔍 PRINT OUTPUT FOR DEBUG
+            Write-Host "---- UPLOADER OUTPUT ----"
+            Write-Host $output
+            Write-Host "-------------------------"
+
             if ($LASTEXITCODE -ne 0) {
               Write-Host "❌ Upload failed"
               exit 1
             }
 
-            if ($output -match '(https?://[^\s]+)') {
-              $link = $Matches[1]
-              $uploadedLinks += "🔗 $($f.Name): $link"
-              Write-Host $link
+            # 🔥 STRONG LINK DETECTION
+            $lines = $output -split "`n"
+            $found = $false
+
+            foreach ($line in $lines) {
+              if ($line -match 'https?://') {
+                $link = $line.Trim()
+                $uploadedLinks += "🔗 $($f.Name): $link"
+                Write-Host "✅ Found link: $link"
+                $found = $true
+                break
+              }
+            }
+
+            if (-not $found) {
+              Write-Host "⚠️ No link detected for this file"
             }
           }
 
-          Write-Host "✅ Upload complete"
+          Write-Host ""
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "📊 SUMMARY"
+          Write-Host "━━━━━━━━━━━━━━━━━━━━"
+          Write-Host "Links found: $($uploadedLinks.Count)"
+          Write-Host "ChatID: $chatId"
 
-          if ($chatId -and $uploadedLinks.Count -gt 0) {
+          # 📩 TELEGRAM (ALWAYS SEND)
+          if ($chatId) {
             $botToken = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
 
-            $msg = "⚔️ TORVIKING COMPLETE!`n`n" +
-                   ($uploadedLinks -join "`n")
+            if ($uploadedLinks.Count -eq 0) {
+              $msg = "⚠️ Upload finished but NO link detected.\nCheck GitHub logs."
+            } else {
+              $msg = "⚔️ TORVIKING COMPLETE!`n`n" + ($uploadedLinks -join "`n")
+            }
 
             Invoke-RestMethod `
               -Uri "https://api.telegram.org/bot$botToken/sendMessage" `
@@ -110,4 +142,6 @@ jobs:
               })
 
             Write-Host "📨 Telegram sent"
+          } else {
+            Write-Host "⚠️ No Telegram chat ID provided"
           }
